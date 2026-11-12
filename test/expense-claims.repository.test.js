@@ -112,3 +112,57 @@ test('decide は終端状態の申請に conflict を返し状態を変えない
   assert.equal(after.status, 'rejected');
   assert.equal(after.decidedBy, 'a1');
 });
+
+const claimOn = (applicantId, date, amount) => ({
+  applicantId,
+  date,
+  amount,
+  description: '経費',
+});
+
+const zero = { count: 0, totalAmount: 0 };
+
+test('summarizeByMonth は状態ごとの件数と合計を返す', () => {
+  const approved = repo.create(claimOn('u1', '2026-11-01', 1000));
+  const rejected = repo.create(claimOn('u1', '2026-11-15', 2000));
+  repo.create(claimOn('u1', '2026-11-30', 3000));
+  repo.create(claimOn('u1', '2026-11-20', 500));
+  repo.decide(approved.id, 'approved', 'a1');
+  repo.decide(rejected.id, 'rejected', 'a1', '理由');
+  assert.deepEqual(repo.summarizeByMonth('2026-11'), {
+    month: '2026-11',
+    byStatus: {
+      pending: { count: 2, totalAmount: 3500 },
+      approved: { count: 1, totalAmount: 1000 },
+      rejected: { count: 1, totalAmount: 2000 },
+    },
+  });
+});
+
+test('summarizeByMonth は前月末と翌月初の申請を含めない', () => {
+  repo.create(claimOn('u1', '2026-10-31', 100));
+  repo.create(claimOn('u1', '2026-12-01', 200));
+  repo.create(claimOn('u1', '2026-11-10', 300));
+  assert.deepEqual(repo.summarizeByMonth('2026-11').byStatus, {
+    pending: { count: 1, totalAmount: 300 },
+    approved: zero,
+    rejected: zero,
+  });
+});
+
+test('summarizeByMonth は複数の申請者の申請を合算する', () => {
+  repo.create(claimOn('u1', '2026-11-05', 1000));
+  repo.create(claimOn('u2', '2026-11-06', 2500));
+  assert.deepEqual(repo.summarizeByMonth('2026-11').byStatus.pending, {
+    count: 2,
+    totalAmount: 3500,
+  });
+});
+
+test('summarizeByMonth は該当なしの月で 3 状態すべてが 0', () => {
+  repo.create(claimOn('u1', '2026-11-05', 1000));
+  assert.deepEqual(repo.summarizeByMonth('2027-01'), {
+    month: '2027-01',
+    byStatus: { pending: zero, approved: zero, rejected: zero },
+  });
+});

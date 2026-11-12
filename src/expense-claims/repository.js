@@ -30,6 +30,12 @@ export function createRepository(db) {
     `UPDATE expense_claims SET status = ?, decided_by = ?, decided_at = ?, reject_reason = ?
      WHERE id = ? AND status = 'pending'`,
   );
+  const summarizeByMonthStmt = db.prepare(
+    `SELECT status, COUNT(*) AS count, COALESCE(SUM(amount), 0) AS total_amount
+     FROM expense_claims
+     WHERE substr(date, 1, 7) = ?
+     GROUP BY status`,
+  );
 
   function findById(id) {
     return toClaim(findByIdStmt.get(id));
@@ -69,6 +75,19 @@ export function createRepository(db) {
       const existing = findById(id);
       if (!existing) return { result: 'not_found' };
       return { result: 'conflict', claim: existing };
+    },
+
+    // 該当行のない状態も 0 で返すため、3 状態を初期化してから結果を当てはめる
+    summarizeByMonth(month) {
+      const byStatus = {
+        pending: { count: 0, totalAmount: 0 },
+        approved: { count: 0, totalAmount: 0 },
+        rejected: { count: 0, totalAmount: 0 },
+      };
+      for (const row of summarizeByMonthStmt.all(month)) {
+        byStatus[row.status] = { count: row.count, totalAmount: row.total_amount };
+      }
+      return { month, byStatus };
     },
   };
 }

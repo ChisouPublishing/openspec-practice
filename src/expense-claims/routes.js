@@ -46,6 +46,14 @@ const rejectBodySchema = {
   },
 };
 
+const summaryQuerySchema = {
+  type: 'object',
+  required: ['month'],
+  properties: {
+    month: { type: 'string', pattern: '^\\d{4}-(0[1-9]|1[0-2])$' },
+  },
+};
+
 export async function expenseClaimsRoutes(app, { repository }) {
   app.decorateRequest('user', null);
 
@@ -97,6 +105,13 @@ export async function expenseClaimsRoutes(app, { repository }) {
     const { id, role } = request.user;
     return repository.list(role === 'applicant' ? { applicantId: id } : {});
   });
+
+  // preValidation はスキーマ検証より先に動くため、申請者には month の値に関わらず 403 を返す
+  app.get(
+    '/expense-claims/summary',
+    { preValidation: requireRole('approver'), schema: { querystring: summaryQuerySchema } },
+    async (request) => repository.summarizeByMonth(request.query.month),
+  );
 
   // ID の解析と decide の結果（404 / 409）の応答への変換をまとめる
   function decideAndReply(request, reply, status, rejectReason = null) {

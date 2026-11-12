@@ -339,3 +339,109 @@ describe('差戻しの検証の順序', () => {
     assert.equal(res.statusCode, 400);
   });
 });
+
+describe('月ごとの集計', () => {
+  const zero = { count: 0, totalAmount: 0 };
+
+  // month が undefined のときはクエリを付けない
+  function getSummary(month, headers = approver()) {
+    const url =
+      month === undefined
+        ? '/expense-claims/summary'
+        : `/expense-claims/summary?month=${encodeURIComponent(month)}`;
+    return app.inject({ method: 'GET', url, headers });
+  }
+
+  async function createOn(date, amount, headers = applicant()) {
+    const res = await createClaim(headers, { ...validBody, date, amount });
+    assert.equal(res.statusCode, 201);
+    return res.json();
+  }
+
+  test('状態ごとに集計される', async () => {
+    const approved = await createOn('2026-11-01', 1000);
+    const rejected = await createOn('2026-11-15', 2000);
+    await createOn('2026-11-30', 3000);
+    await decide('approve', approved.id);
+    await decide('reject', rejected.id, approver(), validReject);
+
+    const res = await getSummary('2026-11');
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.json(), {
+      month: '2026-11',
+      byStatus: {
+        pending: { count: 1, totalAmount: 3000 },
+        approved: { count: 1, totalAmount: 1000 },
+        rejected: { count: 1, totalAmount: 2000 },
+      },
+    });
+  });
+
+  test('経費の日付で月を判定する', async () => {
+    await createOn('2026-10-31', 100);
+    await createOn('2026-12-01', 200);
+    await createOn('2026-11-10', 300);
+
+    const res = await getSummary('2026-11');
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.json().byStatus, {
+      pending: { count: 1, totalAmount: 300 },
+      approved: zero,
+      rejected: zero,
+    });
+  });
+
+  test('すべての申請者の申請が対象になる', async () => {
+    await createOn('2026-11-05', 1000, applicant('u1'));
+    await createOn('2026-11-06', 2500, applicant('u2'));
+
+    const res = await getSummary('2026-11');
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.json().byStatus.pending, { count: 2, totalAmount: 3500 });
+  });
+
+  test('該当する申請がない', async () => {
+    await createOn('2026-11-05', 1000);
+
+    const res = await getSummary('2027-01');
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.json(), {
+      month: '2027-01',
+      byStatus: { pending: zero, approved: zero, rejected: zero },
+    });
+  });
+
+  test('申請者は集計を見られない', async () => {
+    const res = await getSummary('2026-11', applicant());
+    assert.equal(res.statusCode, 403);
+  });
+
+  test('申請者が不正な月で呼ぶと 400 より先に 403 を返す', async () => {
+    const res = await getSummary('2026-13', applicant());
+    assert.equal(res.statusCode, 403);
+  });
+
+  test('月の指定がない', async () => {
+    const res = await getSummary(undefined);
+    assert.equal(res.statusCode, 400);
+  });
+
+  test('存在しない月', async () => {
+    for (const month of ['2026-13', '2026-00']) {
+      const res = await getSummary(month);
+      assert.equal(res.statusCode, 400, month);
+    }
+  });
+
+  test('形式が違う', async () => {
+    for (const month of ['2026-1', '2026/11', '2026-11-01']) {
+      const res = await getSummary(month);
+      assert.equal(res.statusCode, 400, month);
+    }
+  });
+
+  test('ヘッダーがない', async () => {
+    const res = await getSummary('2026-11', {});
+    assert.equal(res.statusCode, 401);
+  });
+});
