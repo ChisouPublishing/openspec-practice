@@ -27,11 +27,12 @@ export function createRepository(db) {
      VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)`,
   );
   const findByIdStmt = db.prepare('SELECT * FROM expense_claims WHERE id = ?');
-  const listAllStmt = db.prepare(
-    'SELECT * FROM expense_claims ORDER BY created_at DESC, id DESC',
-  );
-  const listByApplicantStmt = db.prepare(
-    'SELECT * FROM expense_claims WHERE applicant_id = ? ORDER BY created_at DESC, id DESC',
+  // 条件は null なら「指定なし」として扱う（申請者・状態の組み合わせを 1 つの文で扱う）
+  const listStmt = db.prepare(
+    `SELECT * FROM expense_claims
+     WHERE (:applicantId IS NULL OR applicant_id = :applicantId)
+       AND (:status IS NULL OR status = :status)
+     ORDER BY created_at DESC, id DESC`,
   );
   const decideStmt = db.prepare(
     `UPDATE expense_claims SET status = ?, decided_by = ?, decided_at = ?, reject_reason = ?
@@ -92,9 +93,11 @@ export function createRepository(db) {
       return insert(input);
     },
 
-    list({ applicantId } = {}) {
-      const rows =
-        applicantId === undefined ? listAllStmt.all() : listByApplicantStmt.all(applicantId);
+    list({ applicantId, status } = {}) {
+      const rows = listStmt.all({
+        applicantId: applicantId ?? null,
+        status: status ?? null,
+      });
       return rows.map(toClaim);
     },
 

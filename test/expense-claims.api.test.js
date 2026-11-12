@@ -254,6 +254,117 @@ describe('申請の一覧', () => {
   });
 });
 
+// query はクエリ文字列（先頭の ? を除く）。undefined のときはクエリを付けない
+function listWithQuery(query, headers = approver()) {
+  const url = query === undefined ? '/expense-claims' : `/expense-claims?${query}`;
+  return app.inject({ method: 'GET', url, headers });
+}
+
+describe('一覧の状態による絞り込み', () => {
+  // 申請者ごとに未判断・承認済み・差戻しの申請を 1 件ずつ作る（この順で作成する）
+  async function createInEachStatus(headers) {
+    const pending = (await createClaim(headers)).json();
+    const approved = (await createClaim(headers)).json();
+    await decide('approve', approved.id);
+    const rejected = await createRejected(headers);
+    return { pending, approved, rejected };
+  }
+
+  test('承認者が未判断の申請だけを見る', async () => {
+    const u1 = await createInEachStatus(applicant('u1'));
+    const u2 = await createInEachStatus(applicant('u2'));
+    const res = await listWithQuery('status=pending');
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(
+      res.json().map((c) => c.id),
+      [u2.pending.id, u1.pending.id],
+    );
+  });
+
+  test('申請者は自分の申請の中から絞り込む', async () => {
+    const u1 = await createInEachStatus(applicant('u1'));
+    await createInEachStatus(applicant('u2'));
+    const res = await listWithQuery('status=approved', applicant('u1'));
+    assert.equal(res.statusCode, 200);
+    const claims = res.json();
+    assert.deepEqual(
+      claims.map((c) => c.id),
+      [u1.approved.id],
+    );
+    assert.equal(claims[0].applicantId, 'u1');
+    assert.equal(claims[0].status, 'approved');
+  });
+
+  test('差戻しで絞り込むと出し直された元の申請も含まれる', async () => {
+    const source = await createRejected();
+    const created = await resubmit(source.id);
+    assert.equal(created.statusCode, 201);
+    const res = await listWithQuery('status=rejected');
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(
+      res.json().map((c) => c.id),
+      [source.id],
+    );
+  });
+
+  test('該当する申請がない', async () => {
+    await createClaim();
+    await createClaim();
+    const res = await listWithQuery('status=approved');
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.json(), []);
+  });
+
+  test('指定しない場合はすべての状態を返す', async () => {
+    await createInEachStatus(applicant('u1'));
+    const res = await listWithQuery(undefined);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(
+      res.json().map((c) => c.status).sort(),
+      ['approved', 'pending', 'rejected'],
+    );
+  });
+});
+
+describe('絞り込む状態の検証', () => {
+  async function assertBadStatus(query) {
+    await createClaim();
+    const res = await listWithQuery(query);
+    assert.equal(res.statusCode, 400, query);
+    return res;
+  }
+
+  test('存在しない状態', async () => {
+    const res = await assertBadStatus('status=draft');
+    const body = res.json();
+    assert.deepEqual(Object.keys(body).sort(), ['error', 'message', 'statusCode']);
+    assert.equal(body.statusCode, 400);
+    assert.equal(body.error, 'Bad Request');
+    assert.equal(
+      body.message,
+      'status は pending・approved・rejected のいずれか 1 つでなければなりません',
+    );
+  });
+
+  test('空の値', async () => {
+    await assertBadStatus('status=');
+  });
+
+  test('大文字で指定する', async () => {
+    await assertBadStatus('status=PENDING');
+  });
+
+  test('複数の状態を指定する', async () => {
+    await assertBadStatus('status=pending&status=rejected');
+    await assertBadStatus('status=pending,rejected');
+  });
+
+  test('ヘッダーがなく状態も不正', async () => {
+    const res = await listWithQuery('status=draft', {});
+    assert.equal(res.statusCode, 401);
+  });
+});
+
 describe('申請の承認・差戻し', () => {
   test('承認に成功する', async () => {
     const { id } = (await createClaim()).json();

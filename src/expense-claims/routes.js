@@ -1,4 +1,6 @@
 const ROLES = new Set(['applicant', 'approver']);
+// repository.summarizeByMonth が初期化する 3 状態と同じ集合
+const CLAIM_STATUSES = new Set(['pending', 'approved', 'rejected']);
 const DESCRIPTION_MAX_LENGTH = 200;
 const AMOUNT_MAX = 1_000_000;
 const REJECT_REASON_MAX_LENGTH = 500;
@@ -113,9 +115,20 @@ export async function expenseClaimsRoutes(app, { repository }) {
     },
   );
 
-  app.get('/expense-claims', async (request) => {
+  // status はスキーマの enum でなくここで検証する（message を日本語にするため）。
+  // 繰り返し指定は配列になるので、文字列であることも確かめる
+  app.get('/expense-claims', async (request, reply) => {
     const { id, role } = request.user;
-    return repository.list(role === 'applicant' ? { applicantId: id } : {});
+    const { status } = request.query;
+    if (status !== undefined && !(typeof status === 'string' && CLAIM_STATUSES.has(status))) {
+      return sendError(
+        reply,
+        400,
+        'Bad Request',
+        'status は pending・approved・rejected のいずれか 1 つでなければなりません',
+      );
+    }
+    return repository.list({ applicantId: role === 'applicant' ? id : undefined, status });
   });
 
   // preValidation はスキーマ検証より先に動くため、申請者には month の値に関わらず 403 を返す

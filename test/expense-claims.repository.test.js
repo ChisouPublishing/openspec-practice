@@ -100,6 +100,44 @@ test('list は created_at DESC, id DESC の順で返す', () => {
   );
 });
 
+// u1・u2 それぞれに未判断・承認済み・差戻しの申請を 1 件ずつ作る（作成順に返す）
+function claimsInEachStatus() {
+  const created = [];
+  for (const applicantId of ['u1', 'u2']) {
+    const pending = repo.create(input(applicantId));
+    const approved = repo.create(input(applicantId));
+    const rejected = repo.create(input(applicantId));
+    repo.decide(approved.id, 'approved', 'a1');
+    repo.decide(rejected.id, 'rejected', 'a1', '理由');
+    created.push({ applicantId, pending, approved, rejected });
+  }
+  return created;
+}
+
+test('list は status だけを指定すると全申請者のその状態の申請を新しい順で返す', () => {
+  const [u1, u2] = claimsInEachStatus();
+  assert.deepEqual(
+    repo.list({ status: 'pending' }).map((c) => c.id),
+    [u2.pending.id, u1.pending.id],
+  );
+  assert.ok(repo.list({ status: 'approved' }).every((c) => c.status === 'approved'));
+  assert.equal(repo.list({ status: 'approved' }).length, 2);
+});
+
+test('list は applicantId と status の両方で絞り込める', () => {
+  const [u1] = claimsInEachStatus();
+  assert.deepEqual(
+    repo.list({ applicantId: 'u1', status: 'rejected' }).map((c) => c.id),
+    [u1.rejected.id],
+  );
+});
+
+test('list は条件を指定しないと全件を返す', () => {
+  claimsInEachStatus();
+  assert.equal(repo.list().length, 6);
+  assert.equal(repo.list({}).length, 6);
+});
+
 test('decide は pending の申請を更新し updated を返す', () => {
   const claim = repo.create(input('u1'));
   const { result, claim: updated } = repo.decide(claim.id, 'approved', 'a1');
