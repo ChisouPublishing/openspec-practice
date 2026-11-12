@@ -41,6 +41,16 @@ test('create 直後の rejectReason は null', () => {
   assert.equal(claim.rejectReason, null);
 });
 
+test('create 直後の resubmittedFrom は null', () => {
+  const claim = repo.create(input('u1'));
+  assert.equal(claim.resubmittedFrom, null);
+});
+
+test('create 直後の resubmitNote は null', () => {
+  const claim = repo.create(input('u1'));
+  assert.equal(claim.resubmitNote, null);
+});
+
 test('decide で差戻すと rejectReason が記録される', () => {
   const claim = repo.create(input('u1'));
   const { result, claim: updated } = repo.decide(claim.id, 'rejected', 'a1', '理由');
@@ -111,6 +121,84 @@ test('decide は終端状態の申請に conflict を返し状態を変えない
   const after = repo.findById(claim.id);
   assert.equal(after.status, 'rejected');
   assert.equal(after.decidedBy, 'a1');
+});
+
+const resubmitInput = {
+  date: '2026-11-02',
+  amount: 1500,
+  description: 'タクシー代（領収書添付）',
+  resubmitNote: '領収書を添付しました',
+};
+
+function rejectedClaim(applicantId = 'u1') {
+  const claim = repo.create(input(applicantId));
+  repo.decide(claim.id, 'rejected', 'a1', '領収書がありません');
+  return repo.findById(claim.id);
+}
+
+const countRows = () => db.prepare('SELECT COUNT(*) AS n FROM expense_claims').get().n;
+
+test('resubmit は差戻した申請から出し直した申請を作成し、元の申請は変えない', () => {
+  const source = rejectedClaim('u1');
+  const outcome = repo.resubmit(source.id, 'u1', resubmitInput);
+  assert.equal(outcome.result, 'created');
+  const { claim } = outcome;
+  assert.notEqual(claim.id, source.id);
+  assert.equal(claim.applicantId, 'u1');
+  assert.equal(claim.status, 'pending');
+  assert.equal(claim.date, '2026-11-02');
+  assert.equal(claim.amount, 1500);
+  assert.equal(claim.description, 'タクシー代（領収書添付）');
+  assert.equal(claim.resubmittedFrom, source.id);
+  assert.equal(claim.resubmitNote, '領収書を添付しました');
+  assert.equal(claim.decidedBy, null);
+  assert.equal(claim.decidedAt, null);
+  assert.equal(claim.rejectReason, null);
+  assert.deepEqual(repo.findById(source.id), source);
+  assert.equal(source.resubmitNote, null);
+});
+
+test('resubmit は存在しない ID と他人の申請に not_found を返す', () => {
+  assert.deepEqual(repo.resubmit(999, 'u1', resubmitInput), { result: 'not_found' });
+  const othersRejected = rejectedClaim('u1');
+  assert.deepEqual(repo.resubmit(othersRejected.id, 'u2', resubmitInput), {
+    result: 'not_found',
+  });
+  const othersPending = repo.create(input('u1'));
+  assert.deepEqual(repo.resubmit(othersPending.id, 'u2', resubmitInput), {
+    result: 'not_found',
+  });
+  assert.equal(countRows(), 2);
+});
+
+test('resubmit は pending・approved の申請に conflict（status）を返す', () => {
+  const pending = repo.create(input('u1'));
+  const approved = repo.create(input('u1'));
+  repo.decide(approved.id, 'approved', 'a1');
+  for (const claim of [pending, approved]) {
+    const outcome = repo.resubmit(claim.id, 'u1', resubmitInput);
+    assert.equal(outcome.result, 'conflict');
+    assert.equal(outcome.reason, 'status');
+  }
+  assert.equal(countRows(), 2);
+});
+
+test('resubmit は 2 回目に conflict（already_resubmitted）を返し、行を増やさない', () => {
+  const source = rejectedClaim('u1');
+  assert.equal(repo.resubmit(source.id, 'u1', resubmitInput).result, 'created');
+  const second = repo.resubmit(source.id, 'u1', resubmitInput);
+  assert.deepEqual(second, { result: 'conflict', reason: 'already_resubmitted' });
+  assert.equal(countRows(), 2);
+});
+
+test('出し直した申請を差戻すと、その申請から出し直せる', () => {
+  const source = rejectedClaim('u1');
+  const { claim: first } = repo.resubmit(source.id, 'u1', resubmitInput);
+  repo.decide(first.id, 'rejected', 'a1', '金額が誤っています');
+  const outcome = repo.resubmit(first.id, 'u1', { ...resubmitInput, resubmitNote: '金額を直しました' });
+  assert.equal(outcome.result, 'created');
+  assert.equal(outcome.claim.resubmittedFrom, first.id);
+  assert.equal(outcome.claim.resubmitNote, '金額を直しました');
 });
 
 const claimOn = (applicantId, date, amount) => ({

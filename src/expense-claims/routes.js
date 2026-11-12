@@ -2,6 +2,8 @@ const ROLES = new Set(['applicant', 'approver']);
 const DESCRIPTION_MAX_LENGTH = 200;
 const AMOUNT_MAX = 1_000_000;
 const REJECT_REASON_MAX_LENGTH = 500;
+// description の上限と同じ値だが、意味が異なるため別に定義する
+const RESUBMIT_NOTE_MAX_LENGTH = 200;
 
 function sendError(reply, statusCode, error, message) {
   return reply.code(statusCode).send({ statusCode, error, message });
@@ -28,6 +30,22 @@ function parseId(raw) {
   return /^[1-9]\d*$/.test(raw) ? Number(raw) : null;
 }
 
+// スキーマで表せない申請内容の検証（作成と出し直しで共有する）。
+// 正規化した値か、400 で返すメッセージのどちらかを返す
+function validateClaimContent({ date, amount, description: rawDescription }) {
+  if (!isRealDate(date)) {
+    return { error: 'date は実在する日付でなければなりません' };
+  }
+  const description = rawDescription.trim();
+  const length = [...description].length;
+  if (length < 1 || length > DESCRIPTION_MAX_LENGTH) {
+    return {
+      error: `description は前後の空白を除いて 1〜${DESCRIPTION_MAX_LENGTH} 文字でなければなりません`,
+    };
+  }
+  return { value: { date, amount, description } };
+}
+
 const createBodySchema = {
   type: 'object',
   required: ['date', 'amount', 'description'],
@@ -35,6 +53,16 @@ const createBodySchema = {
     date: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
     amount: { type: 'integer', minimum: 1, maximum: AMOUNT_MAX },
     description: { type: 'string' },
+  },
+};
+
+// date・amount・description の規則は createBodySchema の定義をそのまま使う
+const resubmitBodySchema = {
+  ...createBodySchema,
+  required: [...createBodySchema.required, 'resubmitNote'],
+  properties: {
+    ...createBodySchema.properties,
+    resubmitNote: { type: 'string' },
   },
 };
 
@@ -75,28 +103,12 @@ export async function expenseClaimsRoutes(app, { repository }) {
     '/expense-claims',
     { preValidation: requireRole('applicant'), schema: { body: createBodySchema } },
     async (request, reply) => {
-      const { date, amount } = request.body;
-      const description = request.body.description.trim();
-
-      if (!isRealDate(date)) {
-        return sendError(reply, 400, 'Bad Request', 'date は実在する日付でなければなりません');
-      }
-      const length = [...description].length;
-      if (length < 1 || length > DESCRIPTION_MAX_LENGTH) {
-        return sendError(
-          reply,
-          400,
-          'Bad Request',
-          `description は前後の空白を除いて 1〜${DESCRIPTION_MAX_LENGTH} 文字でなければなりません`,
-        );
+      const content = validateClaimContent(request.body);
+      if (content.error) {
+        return sendError(reply, 400, 'Bad Request', content.error);
       }
 
-      const claim = repository.create({
-        applicantId: request.user.id,
-        date,
-        amount,
-        description,
-      });
+      const claim = repository.create({ applicantId: request.user.id, ...content.value });
       return reply.code(201).send(claim);
     },
   );
@@ -156,6 +168,48 @@ export async function expenseClaimsRoutes(app, { repository }) {
         );
       }
       return decideAndReply(request, reply, 'rejected', reason);
+    },
+  );
+
+  // 本文の検証は元の申請の存在確認（resubmit）より先に行う（仕様「出し直しの内容の検証」）
+  app.post(
+    '/expense-claims/:id/resubmit',
+    { preValidation: requireRole('applicant'), schema: { body: resubmitBodySchema } },
+    async (request, reply) => {
+      const content = validateClaimContent(request.body);
+      if (content.error) {
+        return sendError(reply, 400, 'Bad Request', content.error);
+      }
+      const resubmitNote = request.body.resubmitNote.trim();
+      const noteLength = [...resubmitNote].length;
+      if (noteLength < 1 || noteLength > RESUBMIT_NOTE_MAX_LENGTH) {
+        return sendError(
+          reply,
+          400,
+          'Bad Request',
+          `resubmitNote は前後の空白を除いて 1〜${RESUBMIT_NOTE_MAX_LENGTH} 文字でなければなりません`,
+        );
+      }
+
+      const id = parseId(request.params.id);
+      if (id === null) {
+        return sendError(reply, 404, 'Not Found', '申請が見つかりません');
+      }
+      const outcome = repository.resubmit(id, request.user.id, {
+        ...content.value,
+        resubmitNote,
+      });
+      if (outcome.result === 'not_found') {
+        return sendError(reply, 404, 'Not Found', '申請が見つかりません');
+      }
+      if (outcome.result === 'conflict') {
+        const message =
+          outcome.reason === 'already_resubmitted'
+            ? 'この申請はすでに出し直されています'
+            : `申請はすでに ${outcome.claim.status} のため変更できません`;
+        return sendError(reply, 409, 'Conflict', message);
+      }
+      return reply.code(201).send(outcome.claim);
     },
   );
 }

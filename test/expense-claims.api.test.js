@@ -37,6 +37,30 @@ function decide(action, id, headers = approver(), payload) {
   return app.inject(options);
 }
 
+const validResubmit = {
+  date: '2026-11-02',
+  amount: 1500,
+  description: 'タクシー代（領収書添付）',
+  resubmitNote: '領収書を添付しました',
+};
+
+function resubmit(id, headers = applicant(), payload = validResubmit) {
+  return app.inject({
+    method: 'POST',
+    url: `/expense-claims/${id}/resubmit`,
+    headers,
+    payload,
+  });
+}
+
+// 申請を作成して差戻し、差戻し後の申請を返す
+async function createRejected(headers = applicant(), body = validBody) {
+  const { id } = (await createClaim(headers, body)).json();
+  const res = await decide('reject', id, approver(), validReject);
+  assert.equal(res.statusCode, 200);
+  return res.json();
+}
+
 describe('利用者の識別', () => {
   test('ヘッダーがない', async () => {
     const res = await app.inject({
@@ -183,11 +207,15 @@ describe('申請の一覧', () => {
       'description',
       'id',
       'rejectReason',
+      'resubmitNote',
+      'resubmittedFrom',
       'status',
     ]);
     assert.equal(claims[0].decidedBy, null);
     assert.equal(claims[0].decidedAt, null);
     assert.equal(claims[0].rejectReason, null);
+    assert.equal(claims[0].resubmittedFrom, null);
+    assert.equal(claims[0].resubmitNote, null);
   });
 
   test('申請がない', async () => {
@@ -211,6 +239,18 @@ describe('申請の一覧', () => {
       ['approved', 'pending'],
     );
     assert.ok(claims.every((c) => c.rejectReason === null));
+  });
+
+  test('出し直しの紐付けが一覧に含まれる', async () => {
+    const source = await createRejected(applicant('u1'));
+    const created = (await resubmit(source.id, applicant('u1'))).json();
+    const claims = await listClaims(applicant('u1'));
+    const resubmitted = claims.find((c) => c.id === created.id);
+    const original = claims.find((c) => c.id === source.id);
+    assert.equal(resubmitted.resubmittedFrom, source.id);
+    assert.equal(resubmitted.resubmitNote, '領収書を添付しました');
+    assert.equal(original.resubmittedFrom, null);
+    assert.equal(original.resubmitNote, null);
   });
 });
 
@@ -289,6 +329,15 @@ describe('申請の承認・差戻し', () => {
     assert.equal(claim.rejectReason, '領収書がありません');
   });
 
+  test('出し直された元の申請も承認できない', async () => {
+    const source = await createRejected();
+    assert.equal((await resubmit(source.id)).statusCode, 201);
+    const res = await decide('approve', source.id);
+    assert.equal(res.statusCode, 409);
+    const original = (await listClaims(approver())).find((c) => c.id === source.id);
+    assert.equal(original.status, 'rejected');
+  });
+
   test('存在しない ID を承認する', async () => {
     assert.equal((await decide('approve', 999)).statusCode, 404);
     assert.equal((await decide('reject', 999, approver(), validReject)).statusCode, 404);
@@ -337,6 +386,165 @@ describe('差戻しの検証の順序', () => {
   test('存在しない申請に不正な理由で差戻す', async () => {
     const res = await decide('reject', 999, approver(), { reason: '' });
     assert.equal(res.statusCode, 400);
+  });
+});
+
+describe('差戻された申請の出し直し', () => {
+  test('出し直しに成功する', async () => {
+    const source = await createRejected(applicant('u1'));
+    const res = await resubmit(source.id, applicant('u1'));
+    assert.equal(res.statusCode, 201);
+    const body = res.json();
+    assert.equal(typeof body.id, 'number');
+    assert.notEqual(body.id, source.id);
+    assert.equal(body.applicantId, 'u1');
+    assert.equal(body.status, 'pending');
+    assert.equal(body.resubmittedFrom, source.id);
+    assert.equal(body.resubmitNote, '領収書を添付しました');
+    assert.equal(body.decidedBy, null);
+    assert.equal(body.decidedAt, null);
+    assert.equal(body.rejectReason, null);
+    assert.equal(body.date, '2026-11-02');
+    assert.equal(body.amount, 1500);
+    assert.equal(body.description, 'タクシー代（領収書添付）');
+  });
+
+  test('resubmitNote は前後の空白を除いて記録される', async () => {
+    const source = await createRejected();
+    const res = await resubmit(source.id, applicant(), {
+      ...validResubmit,
+      resubmitNote: '  金額を直しました  ',
+    });
+    assert.equal(res.statusCode, 201);
+    assert.equal(res.json().resubmitNote, '金額を直しました');
+  });
+
+  test('元の申請は差戻しのまま残る', async () => {
+    const source = await createRejected(applicant('u1'));
+    const created = (await resubmit(source.id, applicant('u1'))).json();
+    const claims = await listClaims(applicant('u1'));
+    assert.deepEqual(
+      claims.map((c) => c.id).sort((a, b) => a - b),
+      [source.id, created.id].sort((a, b) => a - b),
+    );
+    const original = claims.find((c) => c.id === source.id);
+    assert.equal(original.status, 'rejected');
+    assert.equal(original.decidedBy, source.decidedBy);
+    assert.equal(original.decidedAt, source.decidedAt);
+    assert.equal(original.rejectReason, '領収書がありません');
+  });
+});
+
+describe('出し直しの権限', () => {
+  test('承認者は出し直せない', async () => {
+    const source = await createRejected();
+    const res = await resubmit(source.id, approver());
+    assert.equal(res.statusCode, 403);
+    assert.equal((await listClaims(approver())).length, 1);
+  });
+
+  test('他人の申請は出し直せない', async () => {
+    const source = await createRejected(applicant('u1'));
+    const res = await resubmit(source.id, applicant('u2'));
+    assert.equal(res.statusCode, 404);
+    assert.equal((await listClaims(approver())).length, 1);
+  });
+
+  test('他人の差戻されていない申請も 404 になる', async () => {
+    const { id } = (await createClaim(applicant('u1'))).json();
+    const res = await resubmit(id, applicant('u2'));
+    assert.equal(res.statusCode, 404);
+  });
+
+  test('存在しない申請を出し直す', async () => {
+    assert.equal((await resubmit(999)).statusCode, 404);
+    assert.equal((await resubmit('abc')).statusCode, 404);
+  });
+});
+
+describe('出し直しの内容の検証', () => {
+  async function assertResubmitFails(payload) {
+    const source = await createRejected();
+    const res = await resubmit(source.id, applicant(), payload);
+    assert.equal(res.statusCode, 400, JSON.stringify(payload));
+    const claims = await listClaims(approver());
+    assert.ok(claims.every((c) => c.resubmittedFrom !== source.id), JSON.stringify(payload));
+  }
+
+  test('金額が不正', async () => {
+    await assertResubmitFails({ ...validResubmit, amount: 0 });
+  });
+
+  test('必須項目がない', async () => {
+    const body = { ...validResubmit };
+    delete body.description;
+    await assertResubmitFails(body);
+  });
+
+  test('存在しない申請に不正な本文で出し直す', async () => {
+    const res = await resubmit(999, applicant(), { ...validResubmit, date: '2026-02-30' });
+    assert.equal(res.statusCode, 400);
+  });
+
+  test('直した内容のメモがない', async () => {
+    const body = { ...validResubmit };
+    delete body.resubmitNote;
+    await assertResubmitFails(body);
+  });
+
+  test('直した内容のメモが空白だけ', async () => {
+    await assertResubmitFails({ ...validResubmit, resubmitNote: '   ' });
+  });
+
+  test('直した内容のメモが 200 文字を超える', async () => {
+    await assertResubmitFails({ ...validResubmit, resubmitNote: ` ${'あ'.repeat(201)} ` });
+  });
+
+  test('直した内容のメモが 200 文字ちょうど', async () => {
+    const source = await createRejected();
+    const note = 'あ'.repeat(200);
+    const res = await resubmit(source.id, applicant(), { ...validResubmit, resubmitNote: note });
+    assert.equal(res.statusCode, 201);
+    assert.equal(res.json().resubmitNote, note);
+  });
+});
+
+describe('出し直しできる申請', () => {
+  test('未判断の申請は出し直せない', async () => {
+    const { id } = (await createClaim()).json();
+    const res = await resubmit(id);
+    assert.equal(res.statusCode, 409);
+    assert.equal((await listClaims(approver())).length, 1);
+  });
+
+  test('承認済みの申請は出し直せない', async () => {
+    const { id } = (await createClaim()).json();
+    await decide('approve', id);
+    const res = await resubmit(id);
+    assert.equal(res.statusCode, 409);
+    assert.equal((await listClaims(approver())).length, 1);
+  });
+
+  test('同じ申請を 2 回出し直せない', async () => {
+    const source = await createRejected();
+    assert.equal((await resubmit(source.id)).statusCode, 201);
+    const res = await resubmit(source.id);
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.json().message, 'この申請はすでに出し直されています');
+    const claims = await listClaims(approver());
+    assert.equal(claims.filter((c) => c.resubmittedFrom === source.id).length, 1);
+  });
+
+  test('出し直した申請が差戻されたら、さらに出し直せる', async () => {
+    const source = await createRejected();
+    const second = (await resubmit(source.id)).json();
+    await decide('reject', second.id, approver(), { reason: '金額が誤っています' });
+    const res = await resubmit(second.id, applicant(), {
+      ...validResubmit,
+      resubmitNote: '金額を直しました',
+    });
+    assert.equal(res.statusCode, 201);
+    assert.equal(res.json().resubmittedFrom, second.id);
   });
 });
 
@@ -408,6 +616,28 @@ describe('月ごとの集計', () => {
     assert.deepEqual(res.json(), {
       month: '2027-01',
       byStatus: { pending: zero, approved: zero, rejected: zero },
+    });
+  });
+
+  test('差戻した申請と出し直した申請は別々に数えられる', async () => {
+    const source = await createRejected(applicant(), {
+      ...validBody,
+      date: '2026-11-15',
+      amount: 2000,
+    });
+    const res = await resubmit(source.id, applicant(), {
+      ...validResubmit,
+      date: '2026-11-15',
+      amount: 1800,
+    });
+    assert.equal(res.statusCode, 201);
+
+    const summary = await getSummary('2026-11');
+    assert.equal(summary.statusCode, 200);
+    assert.deepEqual(summary.json().byStatus, {
+      pending: { count: 1, totalAmount: 1800 },
+      approved: zero,
+      rejected: { count: 1, totalAmount: 2000 },
     });
   });
 

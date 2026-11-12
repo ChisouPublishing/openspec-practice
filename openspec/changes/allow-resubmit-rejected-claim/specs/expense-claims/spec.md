@@ -3,11 +3,11 @@
 ## ADDED Requirements
 
 ### Requirement: 差戻された申請の出し直し
-システムは、ロールが `applicant` の利用者が自分の申請で状態が `rejected` のものに対し、`POST /expense-claims/:id/resubmit` に `date`・`amount`・`description` を JSON で送ったとき、状態 `pending` の新しい申請を作成し、ステータス 201 と作成した申請を返さなければならない（SHALL）。新しい申請の申請者 ID には `X-User-Id` の値を、`resubmittedFrom` には元の申請の `id` を記録しなければならない（SHALL）。元の申請の状態・`decidedBy`・`decidedAt`・`rejectReason` は変更してはならない（MUST NOT）。
+システムは、ロールが `applicant` の利用者が自分の申請で状態が `rejected` のものに対し、`POST /expense-claims/:id/resubmit` に `date`・`amount`・`description`・`resubmitNote` を JSON で送ったとき、状態 `pending` の新しい申請を作成し、ステータス 201 と作成した申請を返さなければならない（SHALL）。新しい申請の申請者 ID には `X-User-Id` の値を、`resubmittedFrom` には元の申請の `id` を、`resubmitNote` には送った `resubmitNote` の前後の空白を除いた値を記録しなければならない（SHALL）。元の申請の状態・`decidedBy`・`decidedAt`・`rejectReason` は変更してはならない（MUST NOT）。
 
 #### Scenario: 出し直しに成功する
-- **WHEN** 申請者 `u1` の申請（`id` が `1`）が理由 `領収書がありません` で差戻された後、`u1` が `{"date":"2026-11-02","amount":1500,"description":"タクシー代（領収書添付）"}` を付けて `POST /expense-claims/1/resubmit` を呼ぶ
-- **THEN** ステータス 201 が返り、本文は `1` とは異なる `id` を持ち、`applicantId` が `u1`、`status` が `pending`、`resubmittedFrom` が `1`、`decidedBy`・`decidedAt`・`rejectReason` が `null` で、送った `date`・`amount`・`description` を含む
+- **WHEN** 申請者 `u1` の申請（`id` が `1`）が理由 `領収書がありません` で差戻された後、`u1` が `{"date":"2026-11-02","amount":1500,"description":"タクシー代（領収書添付）","resubmitNote":"領収書を添付しました"}` を付けて `POST /expense-claims/1/resubmit` を呼ぶ
+- **THEN** ステータス 201 が返り、本文は `1` とは異なる `id` を持ち、`applicantId` が `u1`、`status` が `pending`、`resubmittedFrom` が `1`、`resubmitNote` が `領収書を添付しました`、`decidedBy`・`decidedAt`・`rejectReason` が `null` で、送った `date`・`amount`・`description` を含む
 
 #### Scenario: 元の申請は差戻しのまま残る
 - **WHEN** 申請者が差戻された申請を出し直した後、一覧を取得する
@@ -33,7 +33,7 @@
 - **THEN** ステータス 404 が返る
 
 ### Requirement: 出し直しの内容の検証
-システムは出し直し API の呼び出し時に本文を「申請内容の検証」と同じ規則で検証し、不正な場合は申請を作成せずにステータス 400 を返さなければならない（SHALL）。本文の検証は、元の申請の存在と申請者の確認より先に行わなければならない（SHALL）。
+システムは出し直し API の呼び出し時に、本文の `date`・`amount`・`description` を「申請内容の検証」と同じ規則で検証しなければならない（SHALL）。`resubmitNote` は必須の文字列で、前後の空白を除いて 1〜200 文字でなければならない（MUST）。いずれかが不正な場合は申請を作成せずにステータス 400 を返さなければならない（SHALL）。本文の検証は、元の申請の存在と申請者の確認より先に行わなければならない（SHALL）。
 
 #### Scenario: 金額が不正
 - **WHEN** 申請者が自分の差戻された申請に、`amount` が `0` の本文を付けて出し直し API を呼ぶ
@@ -46,6 +46,22 @@
 #### Scenario: 存在しない申請に不正な本文で出し直す
 - **WHEN** 申請者が存在しない `id` に、`date` が `2026-02-30` の本文を付けて出し直し API を呼ぶ
 - **THEN** ステータス 400 が返る（404 ではない）
+
+#### Scenario: 直した内容のメモがない
+- **WHEN** 申請者が自分の差戻された申請に、`resubmitNote` を含まない本文を付けて出し直し API を呼ぶ
+- **THEN** ステータス 400 が返り、申請は作成されない
+
+#### Scenario: 直した内容のメモが空白だけ
+- **WHEN** 申請者が自分の差戻された申請に、`resubmitNote` が `"   "` の本文を付けて出し直し API を呼ぶ
+- **THEN** ステータス 400 が返り、申請は作成されない
+
+#### Scenario: 直した内容のメモが 200 文字を超える
+- **WHEN** 申請者が自分の差戻された申請に、前後の空白を除いて 201 文字の `resubmitNote` を付けて出し直し API を呼ぶ
+- **THEN** ステータス 400 が返り、申請は作成されない
+
+#### Scenario: 直した内容のメモが 200 文字ちょうど
+- **WHEN** 申請者が自分の差戻された申請に、200 文字の `resubmitNote` を付けて出し直し API を呼ぶ
+- **THEN** ステータス 201 が返り、`resubmitNote` に送った 200 文字が記録される
 
 ### Requirement: 出し直しできる申請
 システムは、状態が `rejected` で、まだ出し直されていない申請だけを出し直せるようにしなければならない（SHALL）。状態が `pending` または `approved` の申請、およびすでに出し直された申請に出し直しを行おうとした場合、システムは申請を作成せずにステータス 409 を返さなければならない（SHALL）。出し直して作られた申請が差戻された場合は、その申請を出し直せる。
@@ -69,7 +85,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: 申請の一覧
-システムは `GET /expense-claims` に対し、ステータス 200 と申請の配列を作成日時の新しい順で返さなければならない（SHALL）。ロールが `applicant` の場合は自分（`X-User-Id`）の申請のみ、`approver` の場合はすべての申請を返さなければならない（SHALL）。各申請は `id`・`applicantId`・`date`・`amount`・`description`・`status`・`createdAt`・`decidedBy`・`decidedAt`・`rejectReason`・`resubmittedFrom` を含まなければならない（MUST）。未判断の申請の `decidedBy`・`decidedAt` は `null` とする。差戻されていない申請の `rejectReason` は `null` とする。出し直しで作られた申請でない場合、`resubmittedFrom` は `null` とする。
+システムは `GET /expense-claims` に対し、ステータス 200 と申請の配列を作成日時の新しい順で返さなければならない（SHALL）。ロールが `applicant` の場合は自分（`X-User-Id`）の申請のみ、`approver` の場合はすべての申請を返さなければならない（SHALL）。各申請は `id`・`applicantId`・`date`・`amount`・`description`・`status`・`createdAt`・`decidedBy`・`decidedAt`・`rejectReason`・`resubmittedFrom`・`resubmitNote` を含まなければならない（MUST）。未判断の申請の `decidedBy`・`decidedAt` は `null` とする。差戻されていない申請の `rejectReason` は `null` とする。出し直しで作られた申請でない場合、`resubmittedFrom` と `resubmitNote` は `null` とする。
 
 #### Scenario: 申請者は自分の申請だけを見る
 - **WHEN** 申請者 `u1` と `u2` がそれぞれ申請した後、`u1` が一覧を取得する
@@ -92,8 +108,8 @@
 - **THEN** どちらの申請も `rejectReason` が `null` である
 
 #### Scenario: 出し直しの紐付けが一覧に含まれる
-- **WHEN** 申請者が申請 `1` を作成し、それが差戻された後に出し直してから一覧を取得する
-- **THEN** 出し直した申請の `resubmittedFrom` が `1` であり、申請 `1` の `resubmittedFrom` は `null` である
+- **WHEN** 申請者が申請 `1` を作成し、それが差戻された後に `resubmitNote` を `領収書を添付しました` として出し直してから一覧を取得する
+- **THEN** 出し直した申請の `resubmittedFrom` が `1`、`resubmitNote` が `領収書を添付しました` であり、申請 `1` の `resubmittedFrom` と `resubmitNote` は `null` である
 
 ### Requirement: 状態遷移の制約
 システムは `pending` の申請だけを承認・差戻しできるようにしなければならない（SHALL）。`approved` と `rejected` は終端状態であり、これらの申請に承認・差戻しを行おうとした場合は状態を変えずにステータス 409 を返さなければならない（SHALL）。`rejected` の申請に対して受け付ける操作は出し直しだけであり、出し直しても元の申請の状態は `rejected` のまま変わらない。
