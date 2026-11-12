@@ -52,9 +52,11 @@ CREATE TABLE IF NOT EXISTS expense_claims (
 承認・差戻しは `UPDATE ... SET status = ?, decided_by = ?, decided_at = ? WHERE id = ? AND status = 'pending'` を実行し、`changes` が 0 なら `findById` で 404（存在しない）か 409（終端状態）かを判定する。
 - 代替案: SELECT してから UPDATE → 判定と更新の間に別リクエストが割り込む余地があるため、条件付き UPDATE を採用。
 
-### 5. 識別と権限は `preHandler` フックで行う
-経費申請プラグイン内の `preHandler` で `X-User-Id` / `X-User-Role` を検証し、不正なら 401。`request.user = { id, role }` に格納する。各ルートで必要ロールと異なれば 403。
+### 5. 識別は `onRequest`、ロールの確認は `preValidation` で行う
+経費申請プラグイン内の `onRequest` フックで `X-User-Id` / `X-User-Role` を検証し、不正なら 401。`request.user = { id, role }` に格納する。各ルートの `preValidation` で必要ロールと異なれば 403。
 - チェック順は 401 → 403 → 400 / 404 → 409 とする（権限のない利用者に入力エラーや存在有無を返さない）。
+- Fastify はボディのスキーマ検証を `preValidation` の後、`preHandler` の前に行う。そのため識別とロールの確認をスキーマ検証より前のフックに置き、このチェック順を守る。
+- 代替案: `preHandler` で識別と権限を確認する → スキーマ検証が先に実行され、ヘッダーなしの不正なボディに 400 を返してしまうため不採用。
 
 ### 6. 入力検証
 Fastify の JSON Schema（`body` スキーマ）で型・必須・`amount` の `type: integer, minimum: 1`・`date` のパターン・`description` の長さを検証する。Fastify 既定の型変換（文字列 `"100"` → 数値）を避けるため、このルートでは型強制を無効にする（Ajv の `coerceTypes: false` をアプリ全体に設定）。実在日付のチェック（`2026-02-30` を拒否）と、`description` の前後空白除去後の長さチェックはハンドラ内で行い、400 を返す。`description` は trim した値を保存する。
@@ -63,7 +65,7 @@ Fastify の JSON Schema（`body` スキーマ）で型・必須・`amount` の `
 ## Risks / Trade-offs
 
 - [`node:sqlite` は Stability 1（実験的）で、読み込み時に ExperimentalWarning が出る / API が将来変わる可能性] → DB アクセスを `db.js` と repository に閉じ込め、影響範囲を限定する。警告は許容する。
-- [ヘッダーによる識別はなりすましが可能] → 認証は本変更の対象外と明記済み。将来認証を入れる際は `preHandler` を差し替えるだけで済む構成にする。
+- [ヘッダーによる識別はなりすましが可能] → 認証は本変更の対象外と明記済み。将来認証を入れる際は `onRequest` フックを差し替えるだけで済む構成にする。
 - [`DatabaseSync` は同期 API のためリクエスト処理中にイベントループをブロックする] → 想定規模では問題にならない。
 - [`data/` ディレクトリが存在しないと DB を開けない] → `server.js` 起動時にディレクトリを作成し、`data/` を `.gitignore` に追加する。
 
