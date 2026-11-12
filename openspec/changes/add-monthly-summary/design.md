@@ -32,7 +32,7 @@
 
 ### 2. `month` の検証は querystring スキーマで行い、ロール確認は `preValidation` に置く
 
-`schema.querystring` に `required: ['month']`、`month: { type: 'string', pattern: '^\\d{4}-(0[1-9]|1[0-2])$' }` を指定する。Fastify は `preValidation` フックをスキーマ検証より先に実行するため、`requireRole('approver')` を `preValidation` に置けば、申請者が不正な `month` で呼んでも 403 が先に返る（仕様「申請者が不正な月で呼ぶ」）。月は年と月だけなので、日付のような実在チェック（`isRealDate`）は不要で、正規表現で `01`〜`12` に限定すれば足りる。`month=a&month=b` のように配列になった場合も `coerceTypes: false` により型エラーで 400 になる。
+`schema.querystring` に `required: ['month']`、`month: { type: 'string', pattern: '^\\d{4}-(0[1-9]|1[0-2])$' }` を指定する。Fastify は `preValidation` フックをスキーマ検証より先に実行するため、`requireRole('approver')` を `preValidation` に置けば、申請者が不正な `month`（例: `2026-13`）で呼んでも 403 が先に返る（仕様「申請者が不正な月で呼ぶ」）。月は年と月だけなので、日付のような実在チェック（`isRealDate`）は不要で、正規表現で `01`〜`12` に限定すれば足りる。`month=a&month=b` のように配列になった場合も `coerceTypes: false` により型エラーで 400 になる。
 
 ### 3. 集計は SQL の `GROUP BY status` で行い、ゼロ埋めはアプリ側で行う
 
@@ -45,7 +45,7 @@ WHERE substr(date, 1, 7) = ?
 GROUP BY status
 ```
 
-結果は存在する状態の行しか返さないため、`pending`・`approved`・`rejected` をすべて `{ count: 0, totalAmount: 0 }` で初期化してから行を当てはめ、全体の `count`／`totalAmount` は 3 状態の和として計算する。
+結果は存在する状態の行しか返さないため、`pending`・`approved`・`rejected` をすべて `{ count: 0, totalAmount: 0 }` で初期化してから行を当てはめる。
 
 - 代替案: `list()` で全件取得して JS で集計する → 実装は簡単だが全件をメモリに載せるため採らない。
 - 代替案: `WHERE date >= ? AND date < ?`（月初〜翌月初）→ インデックスを使える形だが、翌月の計算が必要になり、現状インデックスもないため、簡潔な `substr` を採る。将来インデックスを張る際に置き換えられる。
@@ -56,8 +56,6 @@ GROUP BY status
 ```json
 {
   "month": "2026-11",
-  "count": 3,
-  "totalAmount": 6000,
   "byStatus": {
     "pending":  { "count": 1, "totalAmount": 3000 },
     "approved": { "count": 1, "totalAmount": 1000 },
@@ -66,7 +64,7 @@ GROUP BY status
 }
 ```
 
-キー名は既存の応答（キャメルケース）に合わせる。`month` はリクエストの値をそのまま返す。
+キー名は既存の応答（キャメルケース）に合わせる。`month` はリクエストの値をそのまま返す。全体の件数・金額合計は返さない。差戻し（`rejected`）の金額を合計に混ぜると月の経費額として誤読されるため、必要な合計はクライアントが状態を選んで足す。
 
 ## Risks / Trade-offs
 
