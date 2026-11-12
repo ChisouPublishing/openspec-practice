@@ -53,6 +53,22 @@ function resubmit(id, headers = applicant(), payload = validResubmit) {
   });
 }
 
+// 本文なしで取り下げ API を呼ぶ
+function withdraw(id, headers = applicant()) {
+  return app.inject({ method: 'POST', url: `/expense-claims/${id}/withdraw`, headers });
+}
+
+// 申請を作成して取り下げ、取り下げ後の申請を返す
+async function createWithdrawn(headers = applicant(), body = validBody) {
+  const { id } = (await createClaim(headers, body)).json();
+  const res = await withdraw(id, headers);
+  assert.equal(res.statusCode, 200);
+  return res.json();
+}
+
+const findClaim = async (id, headers = approver()) =>
+  (await listClaims(headers)).find((c) => c.id === id);
+
 // 申請を作成して差戻し、差戻し後の申請を返す
 async function createRejected(headers = applicant(), body = validBody) {
   const { id } = (await createClaim(headers, body)).json();
@@ -102,6 +118,7 @@ describe('経費の申請', () => {
     assert.equal(body.date, '2026-11-01');
     assert.equal(body.amount, 1200);
     assert.equal(body.description, 'タクシー代');
+    assert.equal(body.withdrawnAt, null);
   });
 
   test('承認者は申請できない', async () => {
@@ -210,6 +227,7 @@ describe('申請の一覧', () => {
       'resubmitNote',
       'resubmittedFrom',
       'status',
+      'withdrawnAt',
     ]);
     assert.equal(claims[0].decidedBy, null);
     assert.equal(claims[0].decidedAt, null);
@@ -251,6 +269,19 @@ describe('申請の一覧', () => {
     assert.equal(resubmitted.resubmitNote, '領収書を添付しました');
     assert.equal(original.resubmittedFrom, null);
     assert.equal(original.resubmitNote, null);
+  });
+
+  test('取り下げていない申請の取り下げ日時は null', async () => {
+    await createClaim();
+    const approved = (await createClaim()).json();
+    await decide('approve', approved.id);
+    await createRejected();
+    const claims = await listClaims(approver());
+    assert.deepEqual(
+      claims.map((c) => c.status).sort(),
+      ['approved', 'pending', 'rejected'],
+    );
+    assert.ok(claims.every((c) => c.withdrawnAt === null));
   });
 });
 
@@ -307,6 +338,28 @@ describe('一覧の状態による絞り込み', () => {
     );
   });
 
+  test('取り下げた申請だけを見る', async () => {
+    await createClaim();
+    const withdrawn = await createWithdrawn();
+    const res = await listWithQuery('status=withdrawn');
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(
+      res.json().map((c) => c.id),
+      [withdrawn.id],
+    );
+  });
+
+  test('未判断で絞り込むと取り下げた申請は含まれない', async () => {
+    const pending = (await createClaim()).json();
+    await createWithdrawn();
+    const res = await listWithQuery('status=pending');
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(
+      res.json().map((c) => c.id),
+      [pending.id],
+    );
+  });
+
   test('該当する申請がない', async () => {
     await createClaim();
     await createClaim();
@@ -317,11 +370,12 @@ describe('一覧の状態による絞り込み', () => {
 
   test('指定しない場合はすべての状態を返す', async () => {
     await createInEachStatus(applicant('u1'));
+    await createWithdrawn(applicant('u1'));
     const res = await listWithQuery(undefined);
     assert.equal(res.statusCode, 200);
     assert.deepEqual(
       res.json().map((c) => c.status).sort(),
-      ['approved', 'pending', 'rejected'],
+      ['approved', 'pending', 'rejected', 'withdrawn'],
     );
   });
 });
@@ -342,7 +396,7 @@ describe('絞り込む状態の検証', () => {
     assert.equal(body.error, 'Bad Request');
     assert.equal(
       body.message,
-      'status は pending・approved・rejected のいずれか 1 つでなければなりません',
+      'status は pending・approved・rejected・withdrawn のいずれか 1 つでなければなりません',
     );
   });
 
@@ -352,11 +406,13 @@ describe('絞り込む状態の検証', () => {
 
   test('大文字で指定する', async () => {
     await assertBadStatus('status=PENDING');
+    await assertBadStatus('status=WITHDRAWN');
   });
 
   test('複数の状態を指定する', async () => {
     await assertBadStatus('status=pending&status=rejected');
     await assertBadStatus('status=pending,rejected');
+    await assertBadStatus('status=pending,withdrawn');
   });
 
   test('ヘッダーがなく状態も不正', async () => {
@@ -374,6 +430,7 @@ describe('申請の承認・差戻し', () => {
     assert.equal(body.status, 'approved');
     assert.equal(body.decidedBy, 'a1');
     assert.ok(body.decidedAt);
+    assert.equal(body.withdrawnAt, null);
   });
 
   test('差戻しに成功する', async () => {
@@ -385,6 +442,7 @@ describe('申請の承認・差戻し', () => {
     assert.equal(body.decidedBy, 'a1');
     assert.ok(body.decidedAt);
     assert.equal(body.rejectReason, '領収書がありません');
+    assert.equal(body.withdrawnAt, null);
   });
 
   test('理由は前後の空白を除いて記録される', async () => {
@@ -447,6 +505,26 @@ describe('申請の承認・差戻し', () => {
     assert.equal(res.statusCode, 409);
     const original = (await listClaims(approver())).find((c) => c.id === source.id);
     assert.equal(original.status, 'rejected');
+  });
+
+  test('取り下げた申請は承認できない', async () => {
+    const { id } = await createWithdrawn();
+    const res = await decide('approve', id);
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.json().message, '申請はすでに withdrawn のため変更できません');
+    const claim = await findClaim(id);
+    assert.equal(claim.status, 'withdrawn');
+    assert.equal(claim.decidedBy, null);
+    assert.equal(claim.decidedAt, null);
+  });
+
+  test('取り下げた申請は差戻しできない', async () => {
+    const { id } = await createWithdrawn();
+    const res = await decide('reject', id, approver(), validReject);
+    assert.equal(res.statusCode, 409);
+    const claim = await findClaim(id);
+    assert.equal(claim.status, 'withdrawn');
+    assert.equal(claim.rejectReason, null);
   });
 
   test('存在しない ID を承認する', async () => {
@@ -518,6 +596,7 @@ describe('差戻された申請の出し直し', () => {
     assert.equal(body.date, '2026-11-02');
     assert.equal(body.amount, 1500);
     assert.equal(body.description, 'タクシー代（領収書添付）');
+    assert.equal(body.withdrawnAt, null);
   });
 
   test('resubmitNote は前後の空白を除いて記録される', async () => {
@@ -636,6 +715,23 @@ describe('出し直しできる申請', () => {
     assert.equal((await listClaims(approver())).length, 1);
   });
 
+  test('取り下げた申請は出し直せない', async () => {
+    const { id } = await createWithdrawn();
+    const res = await resubmit(id);
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.json().message, '申請はすでに withdrawn のため変更できません');
+    assert.equal((await listClaims(approver())).length, 1);
+  });
+
+  test('出し直した申請を取り下げても、元の申請はもう出し直せない', async () => {
+    const source = await createRejected();
+    const second = (await resubmit(source.id)).json();
+    assert.equal((await withdraw(second.id)).statusCode, 200);
+    const res = await resubmit(source.id);
+    assert.equal(res.statusCode, 409);
+    assert.equal((await listClaims(approver())).length, 2);
+  });
+
   test('同じ申請を 2 回出し直せない', async () => {
     const source = await createRejected();
     assert.equal((await resubmit(source.id)).statusCode, 201);
@@ -656,6 +752,99 @@ describe('出し直しできる申請', () => {
     });
     assert.equal(res.statusCode, 201);
     assert.equal(res.json().resubmittedFrom, second.id);
+  });
+});
+
+describe('申請の取り下げ', () => {
+  test('取り下げに成功する', async () => {
+    const created = (await createClaim(applicant('u1'))).json();
+    const res = await withdraw(created.id, applicant('u1'));
+    assert.equal(res.statusCode, 200);
+    const body = res.json();
+    assert.equal(body.id, created.id);
+    assert.equal(body.status, 'withdrawn');
+    assert.equal(typeof body.withdrawnAt, 'string');
+    assert.equal(body.decidedBy, null);
+    assert.equal(body.decidedAt, null);
+    assert.equal(body.rejectReason, null);
+    assert.equal(body.date, created.date);
+    assert.equal(body.amount, created.amount);
+    assert.equal(body.description, created.description);
+  });
+
+  test('取り下げた申請は一覧に残る', async () => {
+    const withdrawn = await createWithdrawn(applicant('u1'));
+    const claims = await listClaims(applicant('u1'));
+    const claim = claims.find((c) => c.id === withdrawn.id);
+    assert.ok(claim);
+    assert.equal(claim.status, 'withdrawn');
+  });
+
+  test('出し直した申請も取り下げられる', async () => {
+    const source = await createRejected(applicant('u1'));
+    const second = (await resubmit(source.id, applicant('u1'))).json();
+    const res = await withdraw(second.id, applicant('u1'));
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.json().status, 'withdrawn');
+    assert.equal(res.json().resubmittedFrom, source.id);
+    assert.equal((await findClaim(source.id)).status, 'rejected');
+  });
+});
+
+describe('取り下げの権限', () => {
+  test('承認者は取り下げられない', async () => {
+    const { id } = (await createClaim()).json();
+    const res = await withdraw(id, approver());
+    assert.equal(res.statusCode, 403);
+    assert.equal((await findClaim(id)).status, 'pending');
+  });
+
+  test('他人の申請は取り下げられない', async () => {
+    const { id } = (await createClaim(applicant('u1'))).json();
+    const res = await withdraw(id, applicant('u2'));
+    assert.equal(res.statusCode, 404);
+    assert.equal((await findClaim(id)).status, 'pending');
+  });
+
+  test('他人の判断済みの申請も 404 になる', async () => {
+    const { id } = (await createClaim(applicant('u1'))).json();
+    await decide('approve', id);
+    const res = await withdraw(id, applicant('u2'));
+    assert.equal(res.statusCode, 404);
+  });
+
+  test('存在しない申請を取り下げる', async () => {
+    assert.equal((await withdraw(999)).statusCode, 404);
+    assert.equal((await withdraw('abc')).statusCode, 404);
+  });
+});
+
+describe('取り下げできる申請', () => {
+  test('承認済みの申請は取り下げられない', async () => {
+    const { id } = (await createClaim()).json();
+    await decide('approve', id);
+    const res = await withdraw(id);
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.json().message, '申請はすでに approved のため変更できません');
+    const claim = await findClaim(id);
+    assert.equal(claim.status, 'approved');
+    assert.equal(claim.withdrawnAt, null);
+  });
+
+  test('差戻された申請は取り下げられない', async () => {
+    const { id } = await createRejected();
+    const res = await withdraw(id);
+    assert.equal(res.statusCode, 409);
+    const claim = await findClaim(id);
+    assert.equal(claim.status, 'rejected');
+    assert.equal(claim.rejectReason, '領収書がありません');
+  });
+
+  test('同じ申請を 2 回取り下げられない', async () => {
+    const first = await createWithdrawn();
+    const res = await withdraw(first.id);
+    assert.equal(res.statusCode, 409);
+    assert.equal((await findClaim(first.id)).withdrawnAt, first.withdrawnAt);
   });
 });
 
@@ -681,8 +870,10 @@ describe('月ごとの集計', () => {
     const approved = await createOn('2026-11-01', 1000);
     const rejected = await createOn('2026-11-15', 2000);
     await createOn('2026-11-30', 3000);
+    const withdrawn = await createOn('2026-11-20', 4000);
     await decide('approve', approved.id);
     await decide('reject', rejected.id, approver(), validReject);
+    assert.equal((await withdraw(withdrawn.id)).statusCode, 200);
 
     const res = await getSummary('2026-11');
     assert.equal(res.statusCode, 200);
@@ -692,8 +883,21 @@ describe('月ごとの集計', () => {
         pending: { count: 1, totalAmount: 3000 },
         approved: { count: 1, totalAmount: 1000 },
         rejected: { count: 1, totalAmount: 2000 },
+        withdrawn: { count: 1, totalAmount: 4000 },
       },
     });
+  });
+
+  test('取り下げた申請は未判断に数えない', async () => {
+    await createOn('2026-11-10', 1000);
+    const withdrawn = await createOn('2026-11-10', 500);
+    assert.equal((await withdraw(withdrawn.id)).statusCode, 200);
+
+    const res = await getSummary('2026-11');
+    assert.equal(res.statusCode, 200);
+    const { byStatus } = res.json();
+    assert.deepEqual(byStatus.pending, { count: 1, totalAmount: 1000 });
+    assert.deepEqual(byStatus.withdrawn, { count: 1, totalAmount: 500 });
   });
 
   test('経費の日付で月を判定する', async () => {
@@ -707,6 +911,7 @@ describe('月ごとの集計', () => {
       pending: { count: 1, totalAmount: 300 },
       approved: zero,
       rejected: zero,
+      withdrawn: zero,
     });
   });
 
@@ -726,7 +931,7 @@ describe('月ごとの集計', () => {
     assert.equal(res.statusCode, 200);
     assert.deepEqual(res.json(), {
       month: '2027-01',
-      byStatus: { pending: zero, approved: zero, rejected: zero },
+      byStatus: { pending: zero, approved: zero, rejected: zero, withdrawn: zero },
     });
   });
 
@@ -749,6 +954,7 @@ describe('月ごとの集計', () => {
       pending: { count: 1, totalAmount: 1800 },
       approved: zero,
       rejected: { count: 1, totalAmount: 2000 },
+      withdrawn: zero,
     });
   });
 

@@ -155,3 +155,48 @@ test('再起動後も出し直しの紐付けとメモが残り、同じ申請�
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('再起動後も取り下げが残る', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'expense-api-'));
+  const dbPath = join(dir, 'expenses.db');
+  const applicantHeaders = { 'x-user-id': 'u1', 'x-user-role': 'applicant' };
+  try {
+    const first = buildApp({ dbPath });
+    const created = await first.inject({
+      method: 'POST',
+      url: '/expense-claims',
+      headers: applicantHeaders,
+      payload: { date: '2026-11-01', amount: 1200, description: 'タクシー代' },
+    });
+    assert.equal(created.statusCode, 201);
+    const { id } = created.json();
+    const withdrawn = await first.inject({
+      method: 'POST',
+      url: `/expense-claims/${id}/withdraw`,
+      headers: applicantHeaders,
+    });
+    assert.equal(withdrawn.statusCode, 200);
+    const { withdrawnAt } = withdrawn.json();
+    await first.close();
+
+    const second = buildApp({ dbPath });
+    try {
+      const res = await second.inject({
+        method: 'GET',
+        url: '/expense-claims',
+        headers: applicantHeaders,
+      });
+      assert.equal(res.statusCode, 200);
+      const claims = res.json();
+      assert.equal(claims.length, 1);
+      assert.equal(claims[0].id, id);
+      assert.equal(claims[0].status, 'withdrawn');
+      assert.equal(typeof claims[0].withdrawnAt, 'string');
+      assert.equal(claims[0].withdrawnAt, withdrawnAt);
+    } finally {
+      await second.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

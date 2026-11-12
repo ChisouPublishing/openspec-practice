@@ -1,6 +1,6 @@
 const ROLES = new Set(['applicant', 'approver']);
-// repository.summarizeByMonth が初期化する 3 状態と同じ集合
-const CLAIM_STATUSES = new Set(['pending', 'approved', 'rejected']);
+// repository.summarizeByMonth が初期化する 4 状態と同じ集合
+const CLAIM_STATUSES = new Set(['pending', 'approved', 'rejected', 'withdrawn']);
 const DESCRIPTION_MAX_LENGTH = 200;
 const AMOUNT_MAX = 1_000_000;
 const REJECT_REASON_MAX_LENGTH = 500;
@@ -125,7 +125,7 @@ export async function expenseClaimsRoutes(app, { repository }) {
         reply,
         400,
         'Bad Request',
-        'status は pending・approved・rejected のいずれか 1 つでなければなりません',
+        'status は pending・approved・rejected・withdrawn のいずれか 1 つでなければなりません',
       );
     }
     return repository.list({ applicantId: role === 'applicant' ? id : undefined, status });
@@ -223,6 +223,31 @@ export async function expenseClaimsRoutes(app, { repository }) {
         return sendError(reply, 409, 'Conflict', message);
       }
       return reply.code(201).send(outcome.claim);
+    },
+  );
+
+  // 本文は受け取らない（スキーマを付けず、送られても無視する）。確認の順番は 401 → 403 → 404 → 409
+  app.post(
+    '/expense-claims/:id/withdraw',
+    { preValidation: requireRole('applicant') },
+    async (request, reply) => {
+      const id = parseId(request.params.id);
+      if (id === null) {
+        return sendError(reply, 404, 'Not Found', '申請が見つかりません');
+      }
+      const outcome = repository.withdraw(id, request.user.id);
+      if (outcome.result === 'not_found') {
+        return sendError(reply, 404, 'Not Found', '申請が見つかりません');
+      }
+      if (outcome.result === 'conflict') {
+        return sendError(
+          reply,
+          409,
+          'Conflict',
+          `申請はすでに ${outcome.claim.status} のため変更できません`,
+        );
+      }
+      return outcome.claim;
     },
   );
 }

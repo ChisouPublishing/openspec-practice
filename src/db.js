@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS expense_claims (
   decided_at   TEXT,
   reject_reason TEXT,
   resubmitted_from INTEGER,
-  resubmit_note TEXT
+  resubmit_note TEXT,
+  withdrawn_at TEXT
 );
 `;
 
@@ -38,6 +39,10 @@ function addMissingColumns(db) {
   }
   if (!columns.has('resubmit_note')) {
     db.exec('ALTER TABLE expense_claims ADD COLUMN resubmit_note TEXT');
+  }
+  // 取り下げは status の CHECK を変えずに目印の列で表す（ADR-0006・ADR-0008）
+  if (!columns.has('withdrawn_at')) {
+    db.exec('ALTER TABLE expense_claims ADD COLUMN withdrawn_at TEXT');
   }
 }
 

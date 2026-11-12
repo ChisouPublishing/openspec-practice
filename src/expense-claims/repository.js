@@ -1,6 +1,15 @@
 // node:sqlite のエラーの errcode は拡張結果コード（test/db.test.js で確認している）
 const SQLITE_CONSTRAINT_UNIQUE = 2067;
 
+// API で返す状態（実効の状態）。取り下げた申請は DB の status が pending のまま
+// withdrawn_at だけが入るため、status を条件にする SQL はこの式を使う（ADR-0008）。
+// toClaim の effectiveStatus と同じ規則
+const EFFECTIVE_STATUS_SQL = `CASE WHEN withdrawn_at IS NOT NULL THEN 'withdrawn' ELSE status END`;
+
+function effectiveStatus(row) {
+  return row.withdrawn_at != null ? 'withdrawn' : row.status;
+}
+
 function toClaim(row) {
   if (!row) return null;
   return {
@@ -9,13 +18,14 @@ function toClaim(row) {
     date: row.date,
     amount: row.amount,
     description: row.description,
-    status: row.status,
+    status: effectiveStatus(row),
     createdAt: row.created_at,
     decidedBy: row.decided_by ?? null,
     decidedAt: row.decided_at ?? null,
     rejectReason: row.reject_reason ?? null,
     resubmittedFrom: row.resubmitted_from ?? null,
     resubmitNote: row.resubmit_note ?? null,
+    withdrawnAt: row.withdrawn_at ?? null,
   };
 }
 
@@ -31,21 +41,27 @@ export function createRepository(db) {
   const listStmt = db.prepare(
     `SELECT * FROM expense_claims
      WHERE (:applicantId IS NULL OR applicant_id = :applicantId)
-       AND (:status IS NULL OR status = :status)
+       AND (:status IS NULL OR ${EFFECTIVE_STATUS_SQL} = :status)
      ORDER BY created_at DESC, id DESC`,
   );
   const decideStmt = db.prepare(
     `UPDATE expense_claims SET status = ?, decided_by = ?, decided_at = ?, reject_reason = ?
-     WHERE id = ? AND status = 'pending'`,
+     WHERE id = ? AND status = 'pending' AND withdrawn_at IS NULL`,
+  );
+  // 申請者の確認も条件に含め、判定と更新を 1 文で行う（ADR-0005）
+  const withdrawStmt = db.prepare(
+    `UPDATE expense_claims SET withdrawn_at = ?
+     WHERE id = ? AND applicant_id = ? AND status = 'pending' AND withdrawn_at IS NULL`,
   );
   const findResubmissionStmt = db.prepare(
     'SELECT id FROM expense_claims WHERE resubmitted_from = ?',
   );
   const summarizeByMonthStmt = db.prepare(
-    `SELECT status, COUNT(*) AS count, COALESCE(SUM(amount), 0) AS total_amount
+    `SELECT ${EFFECTIVE_STATUS_SQL} AS status,
+            COUNT(*) AS count, COALESCE(SUM(amount), 0) AS total_amount
      FROM expense_claims
      WHERE substr(date, 1, 7) = ?
-     GROUP BY status`,
+     GROUP BY ${EFFECTIVE_STATUS_SQL}`,
   );
 
   function findById(id) {
@@ -119,6 +135,17 @@ export function createRepository(db) {
       return { result: 'conflict', claim: existing };
     },
 
+    // 他人の申請は状態に関わらず not_found にする（存在を明かさないため、ADR-0003）
+    withdraw(id, applicantId) {
+      const { changes } = withdrawStmt.run(new Date().toISOString(), id, applicantId);
+      if (changes > 0) {
+        return { result: 'updated', claim: findById(id) };
+      }
+      const existing = findById(id);
+      if (!existing || existing.applicantId !== applicantId) return { result: 'not_found' };
+      return { result: 'conflict', claim: existing };
+    },
+
     // 判定と挿入を 1 つのトランザクションで行う。一意インデックスは事前の確認をすり抜けた場合の最後の防御
     resubmit(sourceId, applicantId, input) {
       db.exec('BEGIN IMMEDIATE');
@@ -135,12 +162,13 @@ export function createRepository(db) {
       }
     },
 
-    // 該当行のない状態も 0 で返すため、3 状態を初期化してから結果を当てはめる
+    // 該当行のない状態も 0 で返すため、4 状態を初期化してから結果を当てはめる
     summarizeByMonth(month) {
       const byStatus = {
         pending: { count: 0, totalAmount: 0 },
         approved: { count: 0, totalAmount: 0 },
         rejected: { count: 0, totalAmount: 0 },
+        withdrawn: { count: 0, totalAmount: 0 },
       };
       for (const row of summarizeByMonthStmt.all(month)) {
         byStatus[row.status] = { count: row.count, totalAmount: row.total_amount };

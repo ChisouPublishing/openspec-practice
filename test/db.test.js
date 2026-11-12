@@ -203,6 +203,60 @@ test('resubmitted_from はあるが resubmit_note のない DB を開くと resu
   }
 });
 
+test('新規 DB に withdrawn_at 列がある', () => {
+  const db = openDatabase(':memory:');
+  try {
+    assert.ok(columnNames(db).includes('withdrawn_at'));
+  } finally {
+    db.close();
+  }
+});
+
+test('withdrawn_at のない旧スキーマの DB を開くと列が追加され、既存行は NULL のまま', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'expense-db-'));
+  try {
+    const path = join(dir, 'old.db');
+    const old = new DatabaseSync(path);
+    old.exec(`
+      CREATE TABLE expense_claims (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        applicant_id TEXT    NOT NULL,
+        date         TEXT    NOT NULL,
+        amount       INTEGER NOT NULL CHECK (amount > 0),
+        description  TEXT    NOT NULL,
+        status       TEXT    NOT NULL DEFAULT 'pending'
+                     CHECK (status IN ('pending','approved','rejected')),
+        created_at   TEXT    NOT NULL,
+        decided_by   TEXT,
+        decided_at   TEXT,
+        reject_reason TEXT,
+        resubmitted_from INTEGER,
+        resubmit_note TEXT
+      );
+      CREATE UNIQUE INDEX expense_claims_resubmitted_from_unique
+        ON expense_claims(resubmitted_from);
+      INSERT INTO expense_claims
+        (applicant_id, date, amount, description, status, created_at)
+      VALUES
+        ('u1', '2026-11-02', 1500, 'タクシー代', 'pending', '2026-11-03T00:00:00.000Z');
+    `);
+    assert.ok(!columnNames(old).includes('withdrawn_at'));
+    old.close();
+
+    const db = openDatabase(path);
+    try {
+      assert.ok(columnNames(db).includes('withdrawn_at'));
+      const row = db.prepare('SELECT * FROM expense_claims').get();
+      assert.equal(row.status, 'pending');
+      assert.equal(row.withdrawn_at, null);
+    } finally {
+      db.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('resubmitted_from が NULL の行は複数挿入でき、同じ値の行は 2 つ挿入できない', () => {
   const db = openDatabase(':memory:');
   try {

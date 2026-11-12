@@ -239,6 +239,84 @@ test('出し直した申請を差戻すと、その申請から出し直せる',
   assert.equal(outcome.claim.resubmitNote, '金額を直しました');
 });
 
+test('withdraw は pending の申請を withdrawn にし withdrawnAt を記録する', () => {
+  const claim = repo.create(input('u1'));
+  assert.equal(claim.withdrawnAt, null);
+  const { result, claim: updated } = repo.withdraw(claim.id, 'u1');
+  assert.equal(result, 'updated');
+  assert.equal(updated.status, 'withdrawn');
+  assert.match(updated.withdrawnAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(updated.decidedBy, null);
+  assert.equal(updated.decidedAt, null);
+  assert.equal(updated.rejectReason, null);
+  assert.deepEqual(repo.findById(claim.id), updated);
+  // DB の status は pending のまま（ADR-0008）
+  assert.equal(
+    db.prepare('SELECT status FROM expense_claims WHERE id = ?').get(claim.id).status,
+    'pending',
+  );
+});
+
+test('withdraw は存在しない ID と他人の申請に not_found を返し、行を変えない', () => {
+  assert.deepEqual(repo.withdraw(999, 'u1'), { result: 'not_found' });
+  const othersPending = repo.create(input('u1'));
+  const othersApproved = repo.create(input('u1'));
+  repo.decide(othersApproved.id, 'approved', 'a1');
+  for (const claim of [othersPending, othersApproved]) {
+    const before = repo.findById(claim.id);
+    assert.deepEqual(repo.withdraw(claim.id, 'u2'), { result: 'not_found' });
+    assert.deepEqual(repo.findById(claim.id), before);
+  }
+});
+
+test('withdraw は approved・rejected・取り下げ済みの申請に conflict を返し、行を変えない', () => {
+  const approved = repo.create(input('u1'));
+  repo.decide(approved.id, 'approved', 'a1');
+  const rejected = rejectedClaim('u1');
+  const withdrawn = repo.create(input('u1'));
+  repo.withdraw(withdrawn.id, 'u1');
+  for (const { id } of [approved, rejected, withdrawn]) {
+    const before = repo.findById(id);
+    const outcome = repo.withdraw(id, 'u1');
+    assert.equal(outcome.result, 'conflict');
+    assert.deepEqual(outcome.claim, before);
+    assert.deepEqual(repo.findById(id), before);
+  }
+});
+
+test('取り下げた申請への decide は conflict を返し、状態を変えない', () => {
+  const claim = repo.create(input('u1'));
+  const { claim: withdrawn } = repo.withdraw(claim.id, 'u1');
+  for (const [status, reason] of [['approved', null], ['rejected', '理由']]) {
+    const outcome = repo.decide(claim.id, status, 'a1', reason);
+    assert.equal(outcome.result, 'conflict');
+    assert.equal(outcome.claim.status, 'withdrawn');
+  }
+  assert.deepEqual(repo.findById(claim.id), withdrawn);
+});
+
+test('取り下げた申請は findById・list・summarizeByMonth のすべてで withdrawn として扱われる', () => {
+  const pending = repo.create(input('u1'));
+  const withdrawn = repo.create(input('u1'));
+  repo.withdraw(withdrawn.id, 'u1');
+  assert.equal(repo.findById(withdrawn.id).status, 'withdrawn');
+  assert.equal(repo.list().find((c) => c.id === withdrawn.id).status, 'withdrawn');
+  assert.deepEqual(
+    repo.list({ status: 'withdrawn' }).map((c) => c.id),
+    [withdrawn.id],
+  );
+  assert.deepEqual(
+    repo.list({ status: 'pending' }).map((c) => c.id),
+    [pending.id],
+  );
+  assert.deepEqual(repo.summarizeByMonth('2026-11').byStatus, {
+    pending: { count: 1, totalAmount: 1200 },
+    approved: zero,
+    rejected: zero,
+    withdrawn: { count: 1, totalAmount: 1200 },
+  });
+});
+
 const claimOn = (applicantId, date, amount) => ({
   applicantId,
   date,
@@ -261,6 +339,7 @@ test('summarizeByMonth は状態ごとの件数と合計を返す', () => {
       pending: { count: 2, totalAmount: 3500 },
       approved: { count: 1, totalAmount: 1000 },
       rejected: { count: 1, totalAmount: 2000 },
+      withdrawn: zero,
     },
   });
 });
@@ -273,6 +352,7 @@ test('summarizeByMonth は前月末と翌月初の申請を含めない', () => 
     pending: { count: 1, totalAmount: 300 },
     approved: zero,
     rejected: zero,
+    withdrawn: zero,
   });
 });
 
@@ -285,10 +365,10 @@ test('summarizeByMonth は複数の申請者の申請を合算する', () => {
   });
 });
 
-test('summarizeByMonth は該当なしの月で 3 状態すべてが 0', () => {
+test('summarizeByMonth は該当なしの月で 4 状態すべてが 0', () => {
   repo.create(claimOn('u1', '2026-11-05', 1000));
   assert.deepEqual(repo.summarizeByMonth('2027-01'), {
     month: '2027-01',
-    byStatus: { pending: zero, approved: zero, rejected: zero },
+    byStatus: { pending: zero, approved: zero, rejected: zero, withdrawn: zero },
   });
 });
