@@ -10,6 +10,7 @@ function toClaim(row) {
     createdAt: row.created_at,
     decidedBy: row.decided_by ?? null,
     decidedAt: row.decided_at ?? null,
+    rejectReason: row.reject_reason ?? null,
   };
 }
 
@@ -26,7 +27,7 @@ export function createRepository(db) {
     'SELECT * FROM expense_claims WHERE applicant_id = ? ORDER BY created_at DESC, id DESC',
   );
   const decideStmt = db.prepare(
-    `UPDATE expense_claims SET status = ?, decided_by = ?, decided_at = ?
+    `UPDATE expense_claims SET status = ?, decided_by = ?, decided_at = ?, reject_reason = ?
      WHERE id = ? AND status = 'pending'`,
   );
 
@@ -54,8 +55,14 @@ export function createRepository(db) {
 
     findById,
 
-    decide(id, status, approverId) {
-      const { changes } = decideStmt.run(status, approverId, new Date().toISOString(), id);
+    decide(id, status, approverId, rejectReason = null) {
+      const { changes } = decideStmt.run(
+        status,
+        approverId,
+        new Date().toISOString(),
+        rejectReason,
+        id,
+      );
       if (changes > 0) {
         return { result: 'updated', claim: findById(id) };
       }

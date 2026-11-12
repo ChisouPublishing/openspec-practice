@@ -36,6 +36,30 @@ test('create は pending の申請を作成しキャメルケースで返す', (
   assert.deepEqual(repo.findById(claim.id), claim);
 });
 
+test('create 直後の rejectReason は null', () => {
+  const claim = repo.create(input('u1'));
+  assert.equal(claim.rejectReason, null);
+});
+
+test('decide で差戻すと rejectReason が記録される', () => {
+  const claim = repo.create(input('u1'));
+  const { result, claim: updated } = repo.decide(claim.id, 'rejected', 'a1', '理由');
+  assert.equal(result, 'updated');
+  assert.equal(updated.status, 'rejected');
+  assert.equal(updated.rejectReason, '理由');
+  assert.equal(repo.findById(claim.id).rejectReason, '理由');
+});
+
+test('終端状態への decide は conflict を返し、既存の rejectReason を上書きしない', () => {
+  const claim = repo.create(input('u1'));
+  repo.decide(claim.id, 'rejected', 'a1', '最初の理由');
+  const { result } = repo.decide(claim.id, 'rejected', 'a2', '別の理由');
+  assert.equal(result, 'conflict');
+  const after = repo.findById(claim.id);
+  assert.equal(after.rejectReason, '最初の理由');
+  assert.equal(after.decidedBy, 'a1');
+});
+
 test('findById は存在しない ID に null を返す', () => {
   assert.equal(repo.findById(999), null);
 });

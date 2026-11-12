@@ -46,3 +46,46 @@ test('再起動後も申請が残る', async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('再起動後も差戻し理由が残る', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'expense-api-'));
+  const dbPath = join(dir, 'expenses.db');
+  try {
+    const first = buildApp({ dbPath });
+    const created = await first.inject({
+      method: 'POST',
+      url: '/expense-claims',
+      headers: { 'x-user-id': 'u1', 'x-user-role': 'applicant' },
+      payload: { date: '2026-11-01', amount: 1200, description: 'タクシー代' },
+    });
+    assert.equal(created.statusCode, 201);
+    const { id } = created.json();
+    const rejected = await first.inject({
+      method: 'POST',
+      url: `/expense-claims/${id}/reject`,
+      headers: { 'x-user-id': 'a1', 'x-user-role': 'approver' },
+      payload: { reason: '領収書がありません' },
+    });
+    assert.equal(rejected.statusCode, 200);
+    await first.close();
+
+    const second = buildApp({ dbPath });
+    try {
+      const res = await second.inject({
+        method: 'GET',
+        url: '/expense-claims',
+        headers: { 'x-user-id': 'u1', 'x-user-role': 'applicant' },
+      });
+      assert.equal(res.statusCode, 200);
+      const claims = res.json();
+      assert.equal(claims.length, 1);
+      assert.equal(claims[0].id, id);
+      assert.equal(claims[0].status, 'rejected');
+      assert.equal(claims[0].rejectReason, '領収書がありません');
+    } finally {
+      await second.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

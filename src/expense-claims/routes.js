@@ -1,5 +1,7 @@
 const ROLES = new Set(['applicant', 'approver']);
 const DESCRIPTION_MAX_LENGTH = 200;
+const AMOUNT_MAX = 1_000_000;
+const REJECT_REASON_MAX_LENGTH = 500;
 
 function sendError(reply, statusCode, error, message) {
   return reply.code(statusCode).send({ statusCode, error, message });
@@ -31,8 +33,16 @@ const createBodySchema = {
   required: ['date', 'amount', 'description'],
   properties: {
     date: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
-    amount: { type: 'integer', minimum: 1 },
+    amount: { type: 'integer', minimum: 1, maximum: AMOUNT_MAX },
     description: { type: 'string' },
+  },
+};
+
+const rejectBodySchema = {
+  type: 'object',
+  required: ['reason'],
+  properties: {
+    reason: { type: 'string' },
   },
 };
 
@@ -88,32 +98,49 @@ export async function expenseClaimsRoutes(app, { repository }) {
     return repository.list(role === 'applicant' ? { applicantId: id } : {});
   });
 
-  for (const [action, status] of [
-    ['approve', 'approved'],
-    ['reject', 'rejected'],
-  ]) {
-    app.post(
-      `/expense-claims/:id/${action}`,
-      { preValidation: requireRole('approver') },
-      async (request, reply) => {
-        const id = parseId(request.params.id);
-        if (id === null) {
-          return sendError(reply, 404, 'Not Found', '申請が見つかりません');
-        }
-        const outcome = repository.decide(id, status, request.user.id);
-        if (outcome.result === 'not_found') {
-          return sendError(reply, 404, 'Not Found', '申請が見つかりません');
-        }
-        if (outcome.result === 'conflict') {
-          return sendError(
-            reply,
-            409,
-            'Conflict',
-            `申請はすでに ${outcome.claim.status} のため変更できません`,
-          );
-        }
-        return outcome.claim;
-      },
-    );
+  // ID の解析と decide の結果（404 / 409）の応答への変換をまとめる
+  function decideAndReply(request, reply, status, rejectReason = null) {
+    const id = parseId(request.params.id);
+    if (id === null) {
+      return sendError(reply, 404, 'Not Found', '申請が見つかりません');
+    }
+    const outcome = repository.decide(id, status, request.user.id, rejectReason);
+    if (outcome.result === 'not_found') {
+      return sendError(reply, 404, 'Not Found', '申請が見つかりません');
+    }
+    if (outcome.result === 'conflict') {
+      return sendError(
+        reply,
+        409,
+        'Conflict',
+        `申請はすでに ${outcome.claim.status} のため変更できません`,
+      );
+    }
+    return outcome.claim;
   }
+
+  app.post(
+    '/expense-claims/:id/approve',
+    { preValidation: requireRole('approver') },
+    async (request, reply) => decideAndReply(request, reply, 'approved'),
+  );
+
+  // 理由の検証は申請の存在確認（decide）より先に行う（仕様「差戻しの検証の順序」）
+  app.post(
+    '/expense-claims/:id/reject',
+    { preValidation: requireRole('approver'), schema: { body: rejectBodySchema } },
+    async (request, reply) => {
+      const reason = request.body.reason.trim();
+      const length = [...reason].length;
+      if (length < 1 || length > REJECT_REASON_MAX_LENGTH) {
+        return sendError(
+          reply,
+          400,
+          'Bad Request',
+          `reason は前後の空白を除いて 1〜${REJECT_REASON_MAX_LENGTH} 文字でなければなりません`,
+        );
+      }
+      return decideAndReply(request, reply, 'rejected', reason);
+    },
+  );
 }

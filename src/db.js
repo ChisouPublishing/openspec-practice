@@ -11,12 +11,24 @@ CREATE TABLE IF NOT EXISTS expense_claims (
                CHECK (status IN ('pending','approved','rejected')),
   created_at   TEXT    NOT NULL,
   decided_by   TEXT,
-  decided_at   TEXT
+  decided_at   TEXT,
+  reject_reason TEXT
 );
 `;
+
+// 既存の DB ファイルに不足している列を追加する（CREATE TABLE IF NOT EXISTS は既存テーブルを変更しないため）
+function addMissingColumns(db) {
+  const columns = new Set(
+    db.prepare('PRAGMA table_info(expense_claims)').all().map((c) => c.name),
+  );
+  if (!columns.has('reject_reason')) {
+    db.exec('ALTER TABLE expense_claims ADD COLUMN reject_reason TEXT');
+  }
+}
 
 export function openDatabase(path) {
   const db = new DatabaseSync(path);
   db.exec(SCHEMA);
+  addMissingColumns(db);
   return db;
 }
