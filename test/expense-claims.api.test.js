@@ -197,7 +197,7 @@ describe('申請内容の検証', () => {
   });
 });
 
-describe('申請の一覧', () => {
+describe('申請の一覧の対象と並び順', () => {
   test('申請者は自分の申請だけを見る', async () => {
     await createClaim(applicant('u1'));
     await createClaim(applicant('u2'));
@@ -239,7 +239,9 @@ describe('申請の一覧', () => {
   test('申請がない', async () => {
     assert.deepEqual(await listClaims(approver()), []);
   });
+});
 
+describe('一覧の申請の項目', () => {
   test('差戻し理由が一覧に含まれる', async () => {
     const { id } = (await createClaim(applicant('u1'))).json();
     await decide('reject', id, approver(), validReject);
@@ -866,95 +868,99 @@ describe('月ごとの集計', () => {
     return res.json();
   }
 
-  test('状態ごとに集計される', async () => {
-    const approved = await createOn('2026-11-01', 1000);
-    const rejected = await createOn('2026-11-15', 2000);
-    await createOn('2026-11-30', 3000);
-    const withdrawn = await createOn('2026-11-20', 4000);
-    await decide('approve', approved.id);
-    await decide('reject', rejected.id, approver(), validReject);
-    assert.equal((await withdraw(withdrawn.id)).statusCode, 200);
+  describe('月ごとの集計の対象と応答', () => {
+    test('状態ごとに集計される', async () => {
+      const approved = await createOn('2026-11-01', 1000);
+      const rejected = await createOn('2026-11-15', 2000);
+      await createOn('2026-11-30', 3000);
+      const withdrawn = await createOn('2026-11-20', 4000);
+      await decide('approve', approved.id);
+      await decide('reject', rejected.id, approver(), validReject);
+      assert.equal((await withdraw(withdrawn.id)).statusCode, 200);
 
-    const res = await getSummary('2026-11');
-    assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.json(), {
-      month: '2026-11',
-      byStatus: {
-        pending: { count: 1, totalAmount: 3000 },
-        approved: { count: 1, totalAmount: 1000 },
+      const res = await getSummary('2026-11');
+      assert.equal(res.statusCode, 200);
+      assert.deepEqual(res.json(), {
+        month: '2026-11',
+        byStatus: {
+          pending: { count: 1, totalAmount: 3000 },
+          approved: { count: 1, totalAmount: 1000 },
+          rejected: { count: 1, totalAmount: 2000 },
+          withdrawn: { count: 1, totalAmount: 4000 },
+        },
+      });
+    });
+
+    test('経費の日付で月を判定する', async () => {
+      await createOn('2026-10-31', 100);
+      await createOn('2026-12-01', 200);
+      await createOn('2026-11-10', 300);
+
+      const res = await getSummary('2026-11');
+      assert.equal(res.statusCode, 200);
+      assert.deepEqual(res.json().byStatus, {
+        pending: { count: 1, totalAmount: 300 },
+        approved: zero,
+        rejected: zero,
+        withdrawn: zero,
+      });
+    });
+
+    test('すべての申請者の申請が対象になる', async () => {
+      await createOn('2026-11-05', 1000, applicant('u1'));
+      await createOn('2026-11-06', 2500, applicant('u2'));
+
+      const res = await getSummary('2026-11');
+      assert.equal(res.statusCode, 200);
+      assert.deepEqual(res.json().byStatus.pending, { count: 2, totalAmount: 3500 });
+    });
+
+    test('該当する申請がない', async () => {
+      await createOn('2026-11-05', 1000);
+
+      const res = await getSummary('2027-01');
+      assert.equal(res.statusCode, 200);
+      assert.deepEqual(res.json(), {
+        month: '2027-01',
+        byStatus: { pending: zero, approved: zero, rejected: zero, withdrawn: zero },
+      });
+    });
+  });
+
+  describe('集計での取り下げと出し直しの扱い', () => {
+    test('差戻した申請と出し直した申請は別々に数えられる', async () => {
+      const source = await createRejected(applicant(), {
+        ...validBody,
+        date: '2026-11-15',
+        amount: 2000,
+      });
+      const res = await resubmit(source.id, applicant(), {
+        ...validResubmit,
+        date: '2026-11-15',
+        amount: 1800,
+      });
+      assert.equal(res.statusCode, 201);
+
+      const summary = await getSummary('2026-11');
+      assert.equal(summary.statusCode, 200);
+      assert.deepEqual(summary.json().byStatus, {
+        pending: { count: 1, totalAmount: 1800 },
+        approved: zero,
         rejected: { count: 1, totalAmount: 2000 },
-        withdrawn: { count: 1, totalAmount: 4000 },
-      },
+        withdrawn: zero,
+      });
     });
-  });
 
-  test('取り下げた申請は未判断に数えない', async () => {
-    await createOn('2026-11-10', 1000);
-    const withdrawn = await createOn('2026-11-10', 500);
-    assert.equal((await withdraw(withdrawn.id)).statusCode, 200);
+    test('取り下げた申請は未判断に数えない', async () => {
+      await createOn('2026-11-10', 1000);
+      const withdrawn = await createOn('2026-11-10', 500);
+      assert.equal((await withdraw(withdrawn.id)).statusCode, 200);
 
-    const res = await getSummary('2026-11');
-    assert.equal(res.statusCode, 200);
-    const { byStatus } = res.json();
-    assert.deepEqual(byStatus.pending, { count: 1, totalAmount: 1000 });
-    assert.deepEqual(byStatus.withdrawn, { count: 1, totalAmount: 500 });
-  });
-
-  test('経費の日付で月を判定する', async () => {
-    await createOn('2026-10-31', 100);
-    await createOn('2026-12-01', 200);
-    await createOn('2026-11-10', 300);
-
-    const res = await getSummary('2026-11');
-    assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.json().byStatus, {
-      pending: { count: 1, totalAmount: 300 },
-      approved: zero,
-      rejected: zero,
-      withdrawn: zero,
-    });
-  });
-
-  test('すべての申請者の申請が対象になる', async () => {
-    await createOn('2026-11-05', 1000, applicant('u1'));
-    await createOn('2026-11-06', 2500, applicant('u2'));
-
-    const res = await getSummary('2026-11');
-    assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.json().byStatus.pending, { count: 2, totalAmount: 3500 });
-  });
-
-  test('該当する申請がない', async () => {
-    await createOn('2026-11-05', 1000);
-
-    const res = await getSummary('2027-01');
-    assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.json(), {
-      month: '2027-01',
-      byStatus: { pending: zero, approved: zero, rejected: zero, withdrawn: zero },
-    });
-  });
-
-  test('差戻した申請と出し直した申請は別々に数えられる', async () => {
-    const source = await createRejected(applicant(), {
-      ...validBody,
-      date: '2026-11-15',
-      amount: 2000,
-    });
-    const res = await resubmit(source.id, applicant(), {
-      ...validResubmit,
-      date: '2026-11-15',
-      amount: 1800,
-    });
-    assert.equal(res.statusCode, 201);
-
-    const summary = await getSummary('2026-11');
-    assert.equal(summary.statusCode, 200);
-    assert.deepEqual(summary.json().byStatus, {
-      pending: { count: 1, totalAmount: 1800 },
-      approved: zero,
-      rejected: { count: 1, totalAmount: 2000 },
-      withdrawn: zero,
+      const res = await getSummary('2026-11');
+      assert.equal(res.statusCode, 200);
+      const { byStatus } = res.json();
+      assert.deepEqual(byStatus.pending, { count: 1, totalAmount: 1000 });
+      assert.deepEqual(byStatus.withdrawn, { count: 1, totalAmount: 500 });
     });
   });
 
