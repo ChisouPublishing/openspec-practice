@@ -5,24 +5,18 @@ context: |
   All artifacts must be written in ja.
   Keep OpenSpec structural headings and SHALL/MUST keywords in English.
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always state what is out of scope
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+  技術スタック：Node.js 22.13 以上（ESM）、Fastify 5、データは node:sqlite、テストは node:test（npm test）。依存パッケージは増やさない。
+  API の約束：
+  - 利用者は X-User-Id と X-User-Role（applicant / approver）のヘッダーで識別する。
+  - エラーの応答は { statusCode, error, message } の形で、message は日本語。
+  - 確認の順番は 401（識別）→ 403（権限）→ 400（入力）→ 404（存在）→ 409（状態）。
+  - 仕様は機能 expense-claims（openspec/specs/expense-claims/spec.md）にまとめる。
 
-# Per-operation guidance (optional)
-# Add advisory guidance for how apply and archive work should be conducted.
-# This is separate from artifact rules above.
-# Example:
-#   operations:
-#     apply:
-#       guidance:
-#         - Keep test summaries concise
-#     archive:
-#       guidance:
-#         - Summarize the archive outcome before finishing
+rules:
+  proposal:
+    - 「対象外」の節を設け、この変更でやらないことを箇条書きにする
+  specs:
+    - すべてのシナリオの THEN に HTTP のステータスコードを書く
+  tasks:
+    - 仕様のシナリオごとに、テストを書くタスクを入れる
+    - 最後のタスクは「npm test と openspec validate --strict の成功を確かめる」にする
