@@ -5,7 +5,8 @@
   "main": "index.js",
   "scripts": {
     "test": "node --test",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "openspec:check": "bash scripts/openspec-check.sh"
   },
   "keywords": [],
   "author": "",
@@ -16,5 +17,8 @@
   },
   "dependencies": {
     "fastify": "^5.12.8"
+  },
+  "devDependencies": {
+    "@fission-ai/openspec": "1.17.0"
   }
 }
